@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import List, Tuple
+from typing import List, Tuple, Iterator, Dict
 
 import torch
 import torchaudio
@@ -8,7 +8,6 @@ from models import Model
 from moshi.models import loaders
 from tokenizers.processors import TemplateProcessing
 from transformers import AutoTokenizer
-from watermarking import CSM_1B_GH_WATERMARK, load_watermarker, watermark
 
 
 @dataclass
@@ -51,8 +50,6 @@ class Generator:
         mimi = loaders.get_mimi(mimi_weight, device=device)
         mimi.set_num_codebooks(32)
         self._audio_tokenizer = mimi
-
-        self._watermarker = load_watermarker(device=device)
 
         self.sample_rate = mimi.sample_rate
         self.device = device
@@ -106,7 +103,7 @@ class Generator:
         return torch.cat([text_tokens, audio_tokens], dim=0), torch.cat([text_masks, audio_masks], dim=0)
 
     @torch.inference_mode()
-    def generate(
+    def _generate_token_frames(
         self,
         text: str,
         speaker: int,
@@ -114,7 +111,7 @@ class Generator:
         max_audio_length_ms: float = 90_000,
         temperature: float = 0.9,
         topk: int = 50,
-    ) -> torch.Tensor:
+    ) -> Iterator[torch.Tensor]:
         self._model.reset_caches()
 
         max_generation_len = int(max_audio_length_ms / 80)
@@ -131,41 +128,78 @@ class Generator:
         prompt_tokens = torch.cat(tokens, dim=0).long().to(self.device)
         prompt_tokens_mask = torch.cat(tokens_mask, dim=0).bool().to(self.device)
 
-        samples = []
         curr_tokens = prompt_tokens.unsqueeze(0)
         curr_tokens_mask = prompt_tokens_mask.unsqueeze(0)
         curr_pos = torch.arange(0, prompt_tokens.size(0)).unsqueeze(0).long().to(self.device)
 
-        max_seq_len = 2048
+        max_seq_len = self._model.backbone.max_seq_len
         max_context_len = max_seq_len - max_generation_len
-        if curr_tokens.size(1) >= max_context_len:
-            raise ValueError(
-                f"Inputs too long, must be below max_seq_len - max_generation_len: {max_context_len}"
-            )
+        if curr_tokens.size(1) > max_context_len:
+            print(f"Warning: Prompt length ({curr_tokens.size(1)}) exceeds recommended max context length ({max_context_len}). Performance might degrade.")
 
         for _ in range(max_generation_len):
+            curr_tokens = curr_tokens.to(self.device)
+            curr_tokens_mask = curr_tokens_mask.to(self.device)
+            curr_pos = curr_pos.to(self.device)
+
             sample = self._model.generate_frame(curr_tokens, curr_tokens_mask, curr_pos, temperature, topk)
             if torch.all(sample == 0):
-                break  # eos
+                break
 
-            samples.append(sample)
+            yield sample
 
-            curr_tokens = torch.cat([sample, torch.zeros(1, 1).long().to(self.device)], dim=1).unsqueeze(1)
-            curr_tokens_mask = torch.cat(
-                [torch.ones_like(sample).bool(), torch.zeros(1, 1).bool().to(self.device)], dim=1
-            ).unsqueeze(1)
+            next_token_input = torch.cat([sample, torch.zeros(1, 1, device=self.device).long()], dim=1).unsqueeze(1)
+            next_mask_input = torch.cat([torch.ones_like(sample, dtype=torch.bool), torch.zeros(1, 1, device=self.device, dtype=torch.bool)], dim=1).unsqueeze(1)
+
+            curr_tokens = next_token_input
+            curr_tokens_mask = next_mask_input
             curr_pos = curr_pos[:, -1:] + 1
 
-        audio = self._audio_tokenizer.decode(torch.stack(samples).permute(1, 2, 0)).squeeze(0).squeeze(0)
+    @torch.inference_mode()
+    def generate_buffered(
+        self,
+        text: str,
+        speaker: int,
+        context: List[Segment],
+        buffer_size: int = 10,
+        max_audio_length_ms: float = 90_000,
+        temperature: float = 0.9,
+        topk: int = 50,
+    ) -> Iterator[torch.Tensor]:
+        token_buffer: List[torch.Tensor] = []
+        token_frame_generator = self._generate_token_frames(
+            text, speaker, context, max_audio_length_ms, temperature, topk
+        )
 
-        # This applies an imperceptible watermark to identify audio as AI-generated.
-        # Watermarking ensures transparency, dissuades misuse, and enables traceability.
-        # Please be a responsible AI citizen and keep the watermarking in place.
-        # If using CSM 1B in another application, use your own private key and keep it secret.
-        audio, wm_sample_rate = watermark(self._watermarker, audio, self.sample_rate, CSM_1B_GH_WATERMARK)
-        audio = torchaudio.functional.resample(audio, orig_freq=wm_sample_rate, new_freq=self.sample_rate)
+        for token_frame in token_frame_generator:
+            token_buffer.append(token_frame)
 
-        return audio
+            if len(token_buffer) >= buffer_size:
+                audio_chunk = self.decode_token_sequence(token_buffer)
+                if audio_chunk.shape[1] > 0:
+                    yield audio_chunk
+                token_buffer = []
+
+        if token_buffer:
+            audio_chunk = self.decode_token_sequence(token_buffer)
+            if audio_chunk.shape[1] > 0:
+                yield audio_chunk
+
+    def decode_token_sequence(self, token_frames: List[torch.Tensor]) -> torch.Tensor:
+        if not token_frames:
+            return torch.empty((1, 0), dtype=torch.float32, device=self.device)
+
+        device = token_frames[0].device
+        try:
+            full_token_sequence = torch.cat(token_frames, dim=0).permute(1, 0).unsqueeze(0)
+        except RuntimeError as e:
+            print(f"Warning: Error during token concatenation: {e}")
+            return torch.empty((1, 0), dtype=torch.float32, device=device)
+
+        self._audio_tokenizer = self._audio_tokenizer.to(device)
+        with torch.inference_mode():
+            audio = self._audio_tokenizer.decode(full_token_sequence)
+        return audio.squeeze(1)
 
 
 def load_csm_1b(device: str = "cuda") -> Generator:
