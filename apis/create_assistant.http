@@ -1,0 +1,47 @@
+curl -X POST https://api.vapi.ai/assistant \
+-H "Authorization: Bearer {{$dotenv VAPI_API_KEY}}" \
+-H "Content-Type: application/json" \
+-d '{
+  "model": {
+    "provider": "openai",
+    "model": "gpt-4o",
+    "messages": [
+      {
+        "role": "system",
+        "content": "You are a helpful voice assistant that uses a custom voice generation function."
+      }
+    ],
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "generateAudio",
+          "description": "Generates speech audio dynamically based on the provided text and optional speaker ID.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "text": {
+                "type": "string",
+                "description": "The text content to be synthesized into speech."
+              },
+              "speakerId": {
+                "type": "string",
+                "description": "The speaker ID to use for generation (e.g., '0' or '1'). Defaults to '0' if omitted or invalid."
+              }
+            },
+            "required": ["text"]
+          }
+        }
+      }
+    ]
+  },
+  "voice": null,
+  "serverUrl": "https://csm.huwngtran.com/vapi-callback",
+  "firstMessage": "Hi there! How can I help you today?",
+  "name": "CSM Local Assistant",
+  "transcriber": {
+      "provider": "deepgram",
+      "model": "nova-2",
+      "language": "en"
+  }
+}'

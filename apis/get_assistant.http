@@ -1,0 +1,2 @@
+curl -X GET https://api.vapi.ai/assistant/{{$dotenv VAPI_ASSISTANT_ID}} \
+-H "Authorization: Bearer {{$dotenv VAPI_API_KEY}}"

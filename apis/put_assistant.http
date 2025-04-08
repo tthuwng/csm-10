@@ -1,0 +1,33 @@
+curl -X PUT https://api.vapi.ai/assistant/{{$dotenv VAPI_ASSISTANT_ID}} \
+-H "Authorization: Bearer {{$dotenv VAPI_API_KEY}}" \
+-H "Content-Type: application/json" \
+-d '{
+  "model": {
+    "provider": "openai",
+    "model": "gpt-4o",
+    "messages": [
+      {
+        "role": "system",
+        "content": "You are a helpful voice assistant. Respond directly and concisely."
+      }
+    ],
+    "tools": []
+  },
+  "voice": {
+    "provider": "custom-voice",
+    "server": {
+      "url": "https://csm.huwngtran.com/custom-voice-tts"
+    },
+    "chunkPlan": {
+      "enabled": true
+    }
+  },
+  "serverUrl": null,
+  "firstMessage": null,
+  "name": "CSM Local Assistant",
+  "transcriber": {
+    "model": "nova-2",
+    "language": "en",
+    "provider": "deepgram"
+  }
+}'
