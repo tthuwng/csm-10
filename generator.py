@@ -192,12 +192,6 @@ def load_csm_1b(device: str = "cuda") -> Generator:
     model.to(device=device, dtype=torch.bfloat16)
     model.eval()
 
-    compile_start = time.time()
-    try:
-        model = torch.compile(model, mode="max-autotune", fullgraph=True)
-        print(f"Model compiled successfully in {time.time() - compile_start:.2f} seconds.")
-    except Exception as e:
-        print(f"Warning: Model compilation failed: {e}. Continuing without compilation.")
 
     generator = Generator(model)
     return generator
